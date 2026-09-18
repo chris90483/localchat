@@ -12,6 +12,18 @@
 	word-wrap: anywhere
 }
 
+.user-prompt-div {
+	color: darkgreen;
+}
+
+.think-div {
+	color: gray;
+}
+
+.code-block {
+	font-family: monospace;
+}
+
 #error-box {
 	color: darkred;
 	border: 1px solid gray;
@@ -97,6 +109,191 @@ async function fetchModels() {
 	}
 }
 
+function parseResponseChunk(rawChunk) {
+	try {
+		// usually one chunk is one nicely parseable json message.
+		return [JSON.parse(rawChunk)];
+	} catch (e) {
+		// likely multiple serialized jsons that ended up in the same chunk.
+		// parsing the chunk manually to extract the jsons.
+		let jsons = [];
+		
+		let inStringContext = false;
+		let escapeNext = false;
+		let curlyDepth = 0;
+		let chars = [...rawChunk];
+		let iStartNextJson = 0;
+		
+		for (let i = 0; i < chars.length; i++) {
+			const char = chars[i];
+			if (escapeNext) {
+				escapeNext = false;
+				continue;
+			}
+			switch (char) {
+				case '\\':
+					escapeNext = true;
+					continue;
+				case '"':
+					inStringContext = !inStringContext;
+					continue;
+				case '{':
+					if (!inStringContext) {
+						if (curlyDepth === 0) {
+							iStartNextJson = i;
+						}
+						curlyDepth++;
+					}
+					continue;
+				case '}':
+					if (!inStringContext) {
+						curlyDepth--;	
+					}
+					if (curlyDepth === 0) {
+						// found a json!
+						const jsonStr = rawChunk.substring(iStartNextJson, i + 1);
+						// if parse still fails here we give up.
+						jsons.push(JSON.parse(jsonStr));
+					}
+					continue;
+				default:
+					continue;
+			}
+		}
+		
+		return jsons;
+	}
+}
+
+function setupOutputHtml() {
+	const chat = document.querySelector('#chat-output');
+	const thinkDiv = document.createElement('div');
+	thinkDiv.classList.add('think-div');
+	const thinkDivSpanTxt1 = document.createElement('span');
+	thinkDivSpanTxt1.innerText = 'Thinking about it with ';
+	thinkDiv.appendChild(thinkDivSpanTxt1);
+	const thinkDivSpanTokenCnt = document.createElement('span');
+	thinkDiv.appendChild(thinkDivSpanTokenCnt);
+	const thinkDivSpanTxt2 = document.createElement('span');
+	thinkDivSpanTxt2.innerText = ' tokens';
+	thinkDiv.appendChild(thinkDivSpanTxt2);
+	chat.appendChild(thinkDiv);
+	
+	const mdAnswerDiv = document.createElement('div');
+	chat.appendChild(mdAnswerDiv);
+
+	return {
+		thinkCountSpan: thinkDivSpanTokenCnt,
+		mdAnswerDiv,
+	};
+}
+
+const MD_UNKNOWN = 0;
+const MD_TEXT    = 1
+const MD_CODE    = 2;
+function parseMarkdown(rawAnswer, mdAnswerDiv, state) {
+	if (state.isBusy) {
+		return;
+	}
+	state.isBusy = true;
+
+	let context = MD_TEXT;
+	let char = null;
+
+	let parsedElements = [];
+	let targetElement = document.createElement('div');
+	let { highestParsedMdIndex } = state;
+
+	const chars = [...rawAnswer];
+	for (let i = highestParsedMdIndex; i < chars.length; i++) {
+		char = chars[i];
+
+		switch (char) {
+			case '`':
+				if (chars[i + 1] === '`' && chars[i + 2] === '`') {
+					i += 2;
+					console.log('THREE BACKTICKS IN CONTEXT', context);
+					if (context == MD_CODE) {
+						context = MD_TEXT;
+						console.log('END CODE pusing', targetElement.innerText);
+						parsedElements.push(targetElement);
+						targetElement = document.createElement('div');
+						highestParsedMdIndex = i;
+					} else {
+						context = MD_CODE;
+						console.log('START CODE pusing', targetElement.innerText);
+						parsedElements.push(targetElement);
+						targetElement = document.createElement('div');
+						targetElement.classList.add('code-block');
+						highestParsedMdIndex = i;
+					}
+				}
+				continue;
+			default:
+				targetElement.innerText += char;
+				continue;
+		}
+	}
+
+	state.isBusy = false;
+}
+
+async function readResponseStream(reader) {
+	const decoder = new TextDecoder();
+
+	let {thinkCountSpan, mdAnswerDiv } = setupOutputHtml();
+	let rawAnswer = '';
+	let markdownParserInterval = -1;
+	let parserState = {
+		isBusy: false,
+		highestParsedMdIndex: 0
+	};
+
+	let isThinking = true;
+	let thinkTokenCount = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+
+			const chunkRaw = decoder.decode(value, { stream: true });
+			try {
+				const streamMessages = parseResponseChunk(chunkRaw);
+				
+				for (const message of streamMessages) {
+					if (message.thinking) {
+						thinkTokenCount++;
+						thinkCountSpan.innerText = thinkTokenCount;
+					} else if (message.response) {
+						if (isThinking) {
+							isThinking = false;
+							// markdownParserInterval = setInterval(() => parseMarkdown(rawAnswer, mdAnswerDiv, parserState), 500);
+						}
+
+						//todo: idea was to only show stuff that has been parsed as markdown already.
+						// turns out to be pretty tricky in a streaming context.
+						//rawAnswer += message.response;
+						mdAnswerDiv.innerText += message.response;
+					}
+				}
+			} catch (e) {
+				const errorMessage = e.message || JSON.stringify(e, null, 2);
+				document.querySelector('#error-box').innerText = `unparseable chunk: ${chunkRaw} error: ${JSON.stringify(errorMessage)}`;
+				if (isThinking) {
+					thinkDiv.innerText += ' ';
+				} else {
+					rawAnswer += ' ';
+				}
+				continue;
+			}
+		}
+	} finally {
+		if (markdownParserInterval > -1) {
+			clearInterval(markdownParserInterval);
+		}
+	}
+}
+
 async function sendPrompt(promptTxt) {
 	const payload = {
 		model: settings.model,
@@ -110,35 +307,7 @@ async function sendPrompt(promptTxt) {
 	}
 
 	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
-	let accumulatedResponse = '';
-	let tokenCount = 0;
-	
-	const chat = document.querySelector('#chat-output');
-	let isThinking = true;
-
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-
-		const chunkRaw = decoder.decode(value, { stream: true });
-		try {
-			const chunkJson = JSON.parse(chunkRaw);
-			if (chunkJson.thinking) {
-				chat.innerText += '. ';
-			} else if (chunkJson.response) {
-				if (isThinking) {
-					isThinking = false;
-					chat.innerText += '\n\n';
-				}
-				chat.innerText += chunkJson.response;
-			}
-		} catch {
-			//todo: likely just some whitespace or something.
-			chat.innerText += ' ';
-			continue;
-		}
-	}
+	await readResponseStream(reader);
 }
 
 async function onChatInputKeyDown(event) {
@@ -146,8 +315,12 @@ async function onChatInputKeyDown(event) {
 	if (event.key !== 'Enter') return;
 
 	const prompt = `${document.querySelector('#chat-input').value}`;
-	document.querySelector('#chat-input').value = '';	
-	document.querySelector('#chat-output').innerText = 'Message has been sent! Thinking...';
+	document.querySelector('#chat-input').value = '';
+	const userPromptDiv = document.createElement('div');
+	userPromptDiv.innerText = `\n>${prompt}\n`;
+	userPromptDiv.classList.add('user-prompt-div');
+	
+	document.querySelector('#chat-output').appendChild(userPromptDiv);
 	
 	await sendPrompt(prompt);
 }
