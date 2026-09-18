@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+.flex-col {
+	display: flex;
+	flex-direction: column;
+}
+
+.flex-row {
+
+}
+
+#error-box {
+	color: darkred;
+	border: 1px solid gray;
+}
+</style>
+<script>
+function getCookie(cname) {
+    let name = cname + "=";
+    let decodedCookie = decodeURIComponent(document.cookie);
+    let ca = decodedCookie.split(';');
+    for(let i = 0; i <ca.length; i++) {
+        let c = ca[i];
+        while (c.charAt(0) === ' ') {
+            c = c.substring(1);
+        }
+        if (c.indexOf(name) === 0) {
+            return c.substring(name.length, c.length);
+        }
+    }
+    return "";
+}
+
+function setCookie(cname, cvalue, exdays) {
+    const d = new Date();
+    d.setTime(d.getTime() + (exdays*24*60*60*1000));
+    let expires = "expires="+ d.toUTCString();
+    document.cookie = cname + "=" + cvalue + ";" + expires + ";path=/";
+}
+
+let settings = {};
+const defaultSettings = {
+	apiBaseUrl: "http://localhost:11434",
+	model: null
+};
+
+function onSettingChanged(settingsPropName, newValue) {
+	console.log('setting changed:', settingsPropName, newValue);
+	document.querySelector('#error-box').innerText = '';
+	settings[settingsPropName] = newValue;
+	switch (settingsPropName) {
+		case 'apiBaseUrl': fetchModels(); break;
+	}
+	
+	// if we're here then the new setting is valid and we can persist.
+	setCookie('settings', JSON.stringify(settings), 365);
+}
+
+async function apiSend(method, path, body = null) {
+	while (path.length > 0 && path.startsWith('/')) {
+		path = path.slice(1);
+	}
+	let fetchOptions = { method };
+	if (body) {
+		fetchOptions.headers = {'Content-Type': 'application/json'};
+		fetchOptions.body = JSON.stringify(body);
+	}
+	const res = await fetch(`${settings.apiBaseUrl}/${path}`, fetchOptions);
+	return await res.json();
+}
+
+async function fetchModels() {
+	try {
+		const resObj = await apiSend('GET', 'api/tags');
+		const modelSelectElem = document.querySelector("#model-select");
+		for (const model of resObj.models) {
+			const option = document.createElement('option');
+			option.value = model.model;
+			option.innerText = model.model;
+			modelSelectElem.appendChild(option);
+		}
+	} catch (e) {
+		const errorMessage = e.message || JSON.stringify(e, null, 2);
+		document.querySelector("#error-box").innerText = `Error while trying to fetch models: ${JSON.stringify(errorMessage)}`;
+	}
+}
+
+async function sendPrompt(promptTxt) {
+	const payload = {
+		model: settings.model,
+		prompt: promptTxt,
+		stream: false
+	};
+	const chatResponse = await apiSend('POST', 'api/generate', payload);
+	document.querySelector('#chat-output').innerText = chatResponse.response;
+}
+
+async function onChatInputKeyDown(event) {
+	if (event.shiftKey) return;
+	if (event.key !== 'Enter') return;
+	
+	await sendPrompt(event.srcElement.value);
+
+	document.querySelector('#chat-input').value = '';
+}
+
+function onDomContentLoaded() {
+	const settingsCookieTxt = getCookie('settings') ?? defaultSettings;
+	let settingsCookieParsed = {};
+	try {
+		settingsCookieParsed = JSON.parse(settingsCookieTxt);
+	} catch {};
+	settings = {
+		...defaultSettings,
+		...settingsCookieParsed
+	};
+		
+	document.querySelector("#api-base-url").value = settings.apiBaseUrl;
+	
+	if (settings.apiBaseUrl) {
+		fetchModels();
+	}
+}
+
+document.addEventListener('DOMContentLoaded', onDomContentLoaded);
+</script>
+</head>
+<body>
+<div class="flex-col">
+  <div class="flex-row">
+    <h1>Local chat</h1>
+  </div>
+  <div class="flex-row">
+    <label for="api-base-url">API base URL: </label>
+    <input type="text" id="api-base-url" name="api-base-url" oninput="onSettingChanged('apiBaseUrl', this.value)">
+    <br>
+  </div>
+  <div class="flex-row">
+    <label for="model-select">Model: </label>
+    <select name="model-select" id="model-select" onchange="onSettingChanged('model', this.value)">
+    </select>
+  </div>
+  <div class="flex-row">
+    <div id="error-box"></div>
+  </div>
+  <div class="flex-row">
+    <div id="chat-output"></div>
+  </div>
+  <div class="flex-row">
+    <textarea id="chat-input" onkeydown="onChatInputKeyDown(event)"></textarea>
+  </div>
+</div>
+<body>
+</html>
