@@ -2,6 +2,20 @@
 <html>
 <head>
 <style>
+html {
+	background-color: #333;
+	color: lightgrey;
+}
+
+input, select, textarea {
+	background: black;
+	border: 1px solid black;
+	border-radius: 10px;
+	color: lightgray;
+	padding: 0.5rem;
+	min-width: 20rem;
+}
+
 .flex-col {
 	display: flex;
 	flex-direction: column;
@@ -9,11 +23,13 @@
 }
 
 .flex-row {
-	word-wrap: anywhere
+	word-wrap: anywhere;
+	margin-top: 4px;
+	margin-bottom: 4px;
 }
 
 .user-prompt-div {
-	color: darkgreen;
+	color: green;
 }
 
 .think-div {
@@ -24,12 +40,29 @@
 	font-family: monospace;
 }
 
+.code-language-header {
+	color: darkblue;
+}
+
 #error-box {
 	color: darkred;
 	border: 1px solid gray;
 }
+
+#title-row {
+	display: flex;
+	justify-content: center;
+}
+
 </style>
 <script>
+let g_messageHistory = [];
+let g_settings = {};
+const g_defaultSettings = {
+	apiBaseUrl: "http://localhost:11434",
+	model: null
+};
+
 function getCookie(cname) {
 		let name = cname + "=";
 		let decodedCookie = decodeURIComponent(document.cookie);
@@ -53,22 +86,16 @@ function setCookie(cname, cvalue, exdays) {
 		document.cookie = cname + "=" + cvalue + ";" + expires + ";path=/";
 }
 
-let settings = {};
-const defaultSettings = {
-	apiBaseUrl: "http://localhost:11434",
-	model: null
-};
-
 function onSettingChanged(settingsPropName, newValue) {
 	console.log('setting changed:', settingsPropName, newValue);
 	document.querySelector('#error-box').innerText = '';
-	settings[settingsPropName] = newValue;
+	g_settings[settingsPropName] = newValue;
 	switch (settingsPropName) {
 		case 'apiBaseUrl': fetchModels(); break;
 	}
 	
 	// if we're here then the new setting is valid and we can persist.
-	setCookie('settings', JSON.stringify(settings), 365);
+	setCookie('settings', JSON.stringify(g_settings), 365);
 }
 
 async function apiSend(method, path, body = null, parseJson = true) {
@@ -82,7 +109,7 @@ async function apiSend(method, path, body = null, parseJson = true) {
 	}
 	
 	try {
-		const res = await fetch(`${settings.apiBaseUrl}/${path}`, fetchOptions);
+		const res = await fetch(`${g_settings.apiBaseUrl}/${path}`, fetchOptions);
 		if (!res.ok) {
 			throw new Error(`HTTP ${res.status}: ${text}`);
 		}
@@ -94,7 +121,7 @@ async function apiSend(method, path, body = null, parseJson = true) {
 		return res;
 	} catch (e) {
 		const errorMessage = e.message || JSON.stringify(e, null, 2);
-		document.querySelector("#error-box").innerText = `Error while trying to fetch models: ${JSON.stringify(errorMessage)}`;
+		document.querySelector("#error-box").innerText = `Error while trying to ${method} ${path}: ${JSON.stringify(errorMessage)}`;
 	}
 }
 
@@ -106,6 +133,10 @@ async function fetchModels() {
 		option.value = model.model;
 		option.innerText = model.model;
 		modelSelectElem.appendChild(option);
+	}
+
+	if (g_settings.model) {
+		modelSelectElem.value = g_settings.model;
 	}
 }
 
@@ -169,81 +200,172 @@ function setupOutputHtml() {
 	const chat = document.querySelector('#chat-output');
 	const thinkDiv = document.createElement('div');
 	thinkDiv.classList.add('think-div');
+
 	const thinkDivSpanTxt1 = document.createElement('span');
-	thinkDivSpanTxt1.innerText = 'Thinking about it with ';
+	thinkDivSpanTxt1.innerText = 'Thinking... ';
 	thinkDiv.appendChild(thinkDivSpanTxt1);
+
+	const thinkDivSpanTxt2 = document.createElement('span');
+	thinkDivSpanTxt2.innerText = ' (';
+	thinkDiv.appendChild(thinkDivSpanTxt2);
+	
 	const thinkDivSpanTokenCnt = document.createElement('span');
 	thinkDiv.appendChild(thinkDivSpanTokenCnt);
-	const thinkDivSpanTxt2 = document.createElement('span');
-	thinkDivSpanTxt2.innerText = ' tokens';
-	thinkDiv.appendChild(thinkDivSpanTxt2);
+	
+	const thinkDivSpanTxt3 = document.createElement('span');
+	thinkDivSpanTxt3.innerText = ' tokens)';
+	thinkDiv.appendChild(thinkDivSpanTxt3);
 	chat.appendChild(thinkDiv);
+
+	const thinkDivContentDiv = document.createElement('div');
+	thinkDivContentDiv.classList.add('think-div-content');
+	thinkDiv.appendChild(thinkDivContentDiv);
 	
 	const mdAnswerDiv = document.createElement('div');
 	chat.appendChild(mdAnswerDiv);
 
 	return {
+		thinkContent: thinkDivContentDiv,
 		thinkCountSpan: thinkDivSpanTokenCnt,
 		mdAnswerDiv,
 	};
 }
 
-const MD_UNKNOWN = 0;
-const MD_TEXT    = 1
-const MD_CODE    = 2;
-function parseMarkdown(rawAnswer, mdAnswerDiv, state) {
-	if (state.isBusy) {
-		return;
-	}
-	state.isBusy = true;
+function extractMd(unparsedTxt) {
+	let startTxt = '';
+	const chars = [...unparsedTxt];
+	const results = [];
+	let unparsedStartIndex = 0;
 
-	let context = MD_TEXT;
-	let char = null;
-
-	let parsedElements = [];
-	let targetElement = document.createElement('div');
-	let { highestParsedMdIndex } = state;
-
-	const chars = [...rawAnswer];
-	for (let i = highestParsedMdIndex; i < chars.length; i++) {
-		char = chars[i];
-
+	for (let i = 0; i < chars.length; i++) {
+		const char = chars[i];
 		switch (char) {
-			case '`':
-				if (chars[i + 1] === '`' && chars[i + 2] === '`') {
-					i += 2;
-					console.log('THREE BACKTICKS IN CONTEXT', context);
-					if (context == MD_CODE) {
-						context = MD_TEXT;
-						console.log('END CODE pusing', targetElement.innerText);
-						parsedElements.push(targetElement);
-						targetElement = document.createElement('div');
-						highestParsedMdIndex = i;
-					} else {
-						context = MD_CODE;
-						console.log('START CODE pusing', targetElement.innerText);
-						parsedElements.push(targetElement);
-						targetElement = document.createElement('div');
-						targetElement.classList.add('code-block');
-						highestParsedMdIndex = i;
-					}
+			case '#': {
+				let headerLevel = 0;
+				let j = i;
+				while (chars[j] === '#') {
+					headerLevel++;
+					j++;
 				}
+
+		        if (headerLevel > 6) continue;
+
+				var headerElement = document.createElement(`h${headerLevel}`);
+				const hTextStart = j;
+				while (j < chars.length && chars[j] !== '\n') {
+					j++;
+				}
+				if (j >= chars.length) {
+					// No newline yet: leave this heading in the unparsed tail.
+					break;
+				}
+
+				
+				// SUCCESS
+				if (i > unparsedStartIndex) {
+					// there's also some text stuff inbetween
+					const span = document.createElement('span');
+					span.innerText = unparsedTxt.substring(unparsedStartIndex, i);
+					results.push({element: span, parseContents: false});
+				}
+
+				headerElement.innerText = unparsedTxt.substring(hTextStart, j);
+				results.push({element: headerElement, parseContents: true});
+
+				i = j + 1; // + 1 to skip the newline
+				unparsedStartIndex = i;
 				continue;
-			default:
-				targetElement.innerText += char;
+			}
+			case '`': {
+				if (chars[i + 1] == '`' && chars[i + 2] == '`') {
+
+				}
+				let j = i + 3;
+				let language = '';
+				while (j < chars.length && chars[j] !== '\n') {
+					if (j >= chars.length) {
+						// parse fail, leave in unparsed tail.
+						break;
+					}
+
+					language += chars[j];
+					j++;
+				}
+				if (language.length) {
+					const div = document.createElement('div');
+					div.classList.add('code-language-header');
+					div.innerText = language;
+				}
+				j++ // skip \n
+				const iCodeStart = j;
+
+				while (j < chars.length && (chars[j] !== '`' || chars[j + 1] !== '`' || chars[j + 2] !== '`')) {
+					if (j >= chars.length) {
+						// parse fail, leave in unparsed tail.
+						break;
+					}
+
+					j++;
+				}
+
+
+
+				i = j + 3; // skip the backticks
+				unparsedStartIndex = i;
 				continue;
+			}
 		}
 	}
 
-	state.isBusy = false;
+	// parse MD inside of the found elements
+	/*
+	for (const {element, parseContents} of results) {
+		if (!parseContents) continue;
+		if (!element.textContent) continue;
+		
+		const result = extractMd(element.textContent);
+		for (const subelement of result.elements) {
+			element.appendChild(subelement);
+		}
+		if (result.unparsedTxt) {
+			const span = document.createElement('span');
+			span.innerText = result.unparsedTxt;
+			element.appendChild(span);
+		}
+	}
+	*/
+
+	return {
+		elements: results.map(r => r.element),
+		unparsedTxt: unparsedTxt.substring(unparsedStartIndex, unparsedTxt.length)
+	};
+}
+
+function parseMarkdown(mdAnswerDiv, outputBacklog) {
+	let unparsedTail = mdAnswerDiv.querySelector('.unparsed-tail');
+	if (!unparsedTail) {
+		unparsedTail = document.createElement('span');
+		unparsedTail.classList.add('unparsed-tail');
+		mdAnswerDiv.appendChild(unparsedTail);
+	}
+	let unparsedTxt = unparsedTail.textContent + outputBacklog;
+	let mdElement = null;
+	
+	let result = extractMd(unparsedTxt);
+	for (const mdElement of result.elements) {
+		mdAnswerDiv.insertBefore(mdElement, unparsedTail);
+	}
+	unparsedTxt = result.unparsedTxt;
+	unparsedTail.textContent = unparsedTxt;
 }
 
 async function readResponseStream(reader) {
 	const decoder = new TextDecoder();
 
-	let {thinkCountSpan, mdAnswerDiv } = setupOutputHtml();
-	let rawAnswer = '';
-	let markdownParserInterval = -1;
+	let {thinkContent, thinkCountSpan, mdAnswerDiv } = setupOutputHtml();
+	let outputBacklog = '';
+	let rawResponse=  '';
+	let lastMdParseIterationMs = 0;
 	let parserState = {
 		isBusy: false,
 		highestParsedMdIndex: 0
@@ -251,56 +373,79 @@ async function readResponseStream(reader) {
 
 	let isThinking = true;
 	let thinkTokenCount = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
+	
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) {
+			// parseMarkdown(mdAnswerDiv, outputBacklog);
+			outputBacklog = '';
+			break;
+		};
 
-			const chunkRaw = decoder.decode(value, { stream: true });
-			try {
-				const streamMessages = parseResponseChunk(chunkRaw);
-				
-				for (const message of streamMessages) {
-					if (message.thinking) {
-						thinkTokenCount++;
-						thinkCountSpan.innerText = thinkTokenCount;
-					} else if (message.response) {
-						if (isThinking) {
-							isThinking = false;
-							// markdownParserInterval = setInterval(() => parseMarkdown(rawAnswer, mdAnswerDiv, parserState), 500);
-						}
-
-						//todo: idea was to only show stuff that has been parsed as markdown already.
-						// turns out to be pretty tricky in a streaming context.
-						//rawAnswer += message.response;
-						mdAnswerDiv.innerText += message.response;
+		const chunkRaw = decoder.decode(value, { stream: true });
+		console.log('raw chunk', chunkRaw);
+		try {
+			const streamMessages = parseResponseChunk(chunkRaw);
+			
+			for (const { message } of streamMessages) {
+				if (message.thinking) {
+					thinkTokenCount++;
+					thinkCountSpan.innerText = thinkTokenCount;
+					if (message.thinking.includes('.')) {
+						thinkContent.innerText = '';
+					} else {
+						thinkContent.innerText += message.thinking.replaceAll('\n', '');
 					}
+				} else if (message.content) {
+					if (isThinking) {
+						isThinking = false;
+						thinkContent.innerText = '';
+					}
+
+					rawResponse += message.content;
+					mdAnswerDiv.innerText += message.content;
+					/*
+					outputBacklog += message.response;
+					
+					if (Date.now() - lastMdParseIterationMs > 1000) {
+						parseMarkdown(mdAnswerDiv, outputBacklog);
+						outputBacklog = '';
+					}
+					*/
 				}
-			} catch (e) {
-				const errorMessage = e.message || JSON.stringify(e, null, 2);
-				document.querySelector('#error-box').innerText = `unparseable chunk: ${chunkRaw} error: ${JSON.stringify(errorMessage)}`;
-				if (isThinking) {
-					thinkDiv.innerText += ' ';
-				} else {
-					rawAnswer += ' ';
-				}
-				continue;
 			}
-		}
-	} finally {
-		if (markdownParserInterval > -1) {
-			clearInterval(markdownParserInterval);
+		} catch (e) {
+			const errorMessage = e.message || JSON.stringify(e, null, 2);
+			document.querySelector('#error-box').innerText = `unparseable chunk: ${chunkRaw} error: ${JSON.stringify(errorMessage)}`;
+			if (isThinking) {
+				thinkDiv.innerText += ' ';
+			} else {
+				rawAnswer += ' ';
+			}
+			continue;
 		}
 	}
+
+	g_messageHistory.push({
+		role: 'assistant',
+		content: rawResponse
+	});
 }
 
 async function sendPrompt(promptTxt) {
+	g_messageHistory.push({
+		role: 'user',
+		content: promptTxt
+	});
+
 	const payload = {
-		model: settings.model,
+		messages: g_messageHistory,
+		model: g_settings.model,
 		prompt: promptTxt,
+		think: true,
 		stream: true
 	};
-	const response = await apiSend('POST', 'api/generate', payload, false);
+	const response = await apiSend('POST', 'api/chat', payload, false);
 	
 	if (!response.body) {
 		throw new Error('No stream received');
@@ -313,6 +458,8 @@ async function sendPrompt(promptTxt) {
 async function onChatInputKeyDown(event) {
 	if (event.shiftKey) return;
 	if (event.key !== 'Enter') return;
+	
+	event.preventDefault();
 
 	const prompt = `${document.querySelector('#chat-input').value}`;
 	document.querySelector('#chat-input').value = '';
@@ -321,24 +468,23 @@ async function onChatInputKeyDown(event) {
 	userPromptDiv.classList.add('user-prompt-div');
 	
 	document.querySelector('#chat-output').appendChild(userPromptDiv);
-	
 	await sendPrompt(prompt);
 }
 
 function onDomContentLoaded() {
-	const settingsCookieTxt = getCookie('settings') ?? defaultSettings;
+	const settingsCookieTxt = getCookie('settings') ?? g_defaultSettings;
 	let settingsCookieParsed = {};
 	try {
 		settingsCookieParsed = JSON.parse(settingsCookieTxt);
 	} catch {};
-	settings = {
-		...defaultSettings,
+	g_settings = {
+		...g_defaultSettings,
 		...settingsCookieParsed
 	};
 		
-	document.querySelector("#api-base-url").value = settings.apiBaseUrl;
+	document.querySelector("#api-base-url").value = g_settings.apiBaseUrl;
 	
-	if (settings.apiBaseUrl) {
+	if (g_settings.apiBaseUrl) {
 		fetchModels();
 	}
 }
@@ -348,8 +494,8 @@ document.addEventListener('DOMContentLoaded', onDomContentLoaded);
 </head>
 <body>
 <div class="flex-col">
-	<div class="flex-row">
-		<h1>Local chat</h1>
+	<div id="title-row" class="flex-row">
+		<h1>Local chat!</h1>
 	</div>
 	<div class="flex-row">
 		<label for="api-base-url">API base URL: </label>
