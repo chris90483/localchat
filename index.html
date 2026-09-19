@@ -44,6 +44,10 @@ input, select, textarea {
 	color: darkblue;
 }
 
+.hidden {
+	display: none;
+}
+
 #error-box {
 	color: darkred;
 	border: 1px solid gray;
@@ -54,14 +58,31 @@ input, select, textarea {
 	justify-content: center;
 }
 
+#context-window-view {
+	background-color: rgb(177, 177, 177);
+	color: black;
+	position: fixed;
+	width: 100vw;
+	padding-left: 0.3rem;
+	padding-top: 3px;
+	padding-bottom: 3px;
+	bottom: 0;
+	left: 0;
+}
+
 </style>
 <script>
-let g_messageHistory = [];
+let g_contextWindow = {
+	amountTokens: 0,
+	messages: []
+};
 let g_settings = {};
 const g_defaultSettings = {
 	apiBaseUrl: "http://localhost:11434",
 	model: null
 };
+let g_models = [];
+let g_currentModel = null;
 
 function getCookie(cname) {
 		let name = cname + "=";
@@ -86,12 +107,26 @@ function setCookie(cname, cvalue, exdays) {
 		document.cookie = cname + "=" + cvalue + ";" + expires + ";path=/";
 }
 
+function addToContextWindow(message) {
+	g_contextWindow.amountTokens += message.content.length;
+	g_contextWindow.messages.push(message);
+}
+
 function onSettingChanged(settingsPropName, newValue) {
 	console.log('setting changed:', settingsPropName, newValue);
 	document.querySelector('#error-box').innerText = '';
 	g_settings[settingsPropName] = newValue;
 	switch (settingsPropName) {
 		case 'apiBaseUrl': fetchModels(); break;
+		case 'model': {
+			const model = g_models.find(m => m.name === newValue);
+			if (!model) break;
+			g_currentModel = model;
+			document.querySelector('#context-window-max-tokens').innerText =
+				model.details?.context_length ?? '?';
+			break;
+		}
+			
 	}
 	
 	// if we're here then the new setting is valid and we can persist.
@@ -126,9 +161,12 @@ async function apiSend(method, path, body = null, parseJson = true) {
 }
 
 async function fetchModels() {
-	const models = await apiSend('GET', 'api/tags');
+	const res = await apiSend('GET', 'api/tags');
 	const modelSelectElem = document.querySelector("#model-select");
-	for (const model of models.models) {
+	
+	g_models = [];
+	for (const model of res.models) {
+		g_models.push(model);
 		const option = document.createElement('option');
 		option.value = model.model;
 		option.innerText = model.model;
@@ -136,7 +174,7 @@ async function fetchModels() {
 	}
 
 	if (g_settings.model) {
-		modelSelectElem.value = g_settings.model;
+		onSettingChanged('model', g_settings.model);
 	}
 }
 
@@ -200,6 +238,7 @@ function setupOutputHtml() {
 	const chat = document.querySelector('#chat-output');
 	const thinkDiv = document.createElement('div');
 	thinkDiv.classList.add('think-div');
+	thinkDiv.classList.add('hidden');
 
 	const thinkDivSpanTxt1 = document.createElement('span');
 	thinkDivSpanTxt1.innerText = 'Thinking... ';
@@ -225,6 +264,7 @@ function setupOutputHtml() {
 	chat.appendChild(mdAnswerDiv);
 
 	return {
+		thinkDiv,
 		thinkContent: thinkDivContentDiv,
 		thinkCountSpan: thinkDivSpanTokenCnt,
 		mdAnswerDiv,
@@ -362,7 +402,7 @@ function parseMarkdown(mdAnswerDiv, outputBacklog) {
 async function readResponseStream(reader) {
 	const decoder = new TextDecoder();
 
-	let {thinkContent, thinkCountSpan, mdAnswerDiv } = setupOutputHtml();
+	let {thinkDiv, thinkContent, thinkCountSpan, mdAnswerDiv } = setupOutputHtml();
 	let outputBacklog = '';
 	let rawResponse=  '';
 	let lastMdParseIterationMs = 0;
@@ -371,7 +411,7 @@ async function readResponseStream(reader) {
 		highestParsedMdIndex: 0
 	};
 
-	let isThinking = true;
+	let isThinking = false;
 	let thinkTokenCount = 0;
 	
 	while (true) {
@@ -387,23 +427,27 @@ async function readResponseStream(reader) {
 		try {
 			const streamMessages = parseResponseChunk(chunkRaw);
 			
-			for (const { message } of streamMessages) {
-				if (message.thinking) {
+			for (const message of streamMessages) {
+				if (message.message.thinking) {
+					if (!isThinking) {
+						isThinking = true;
+						thinkDiv.classList.remove('hidden');
+					}
 					thinkTokenCount++;
 					thinkCountSpan.innerText = thinkTokenCount;
-					if (message.thinking.includes('.')) {
+					if (message.message.thinking.includes('.')) {
 						thinkContent.innerText = '';
 					} else {
-						thinkContent.innerText += message.thinking.replaceAll('\n', '');
+						thinkContent.innerText += message.message.thinking.replaceAll('\n', '');
 					}
-				} else if (message.content) {
+				} else if (message.message.content) {
 					if (isThinking) {
 						isThinking = false;
 						thinkContent.innerText = '';
 					}
 
-					rawResponse += message.content;
-					mdAnswerDiv.innerText += message.content;
+					rawResponse += message.message.content;
+					mdAnswerDiv.innerText += message.message.content;
 					/*
 					outputBacklog += message.response;
 					
@@ -413,6 +457,11 @@ async function readResponseStream(reader) {
 					}
 					*/
 				}
+
+				if (message.done) {
+					g_contextWindow.amountTokens = message.prompt_eval_count + message.eval_count;
+					document.querySelector("#context-window-amount-tokens").innerText = g_contextWindow.amountTokens;
+				}
 			}
 		} catch (e) {
 			const errorMessage = e.message || JSON.stringify(e, null, 2);
@@ -420,30 +469,33 @@ async function readResponseStream(reader) {
 			if (isThinking) {
 				thinkDiv.innerText += ' ';
 			} else {
-				rawAnswer += ' ';
+				mdAnswerDiv.innerText += ' ';
 			}
 			continue;
 		}
 	}
 
-	g_messageHistory.push({
+	addToContextWindow({
 		role: 'assistant',
 		content: rawResponse
 	});
 }
 
 async function sendPrompt(promptTxt) {
-	g_messageHistory.push({
+	addToContextWindow({
 		role: 'user',
 		content: promptTxt
 	});
 
 	const payload = {
-		messages: g_messageHistory,
+		messages: g_contextWindow.messages,
 		model: g_settings.model,
 		prompt: promptTxt,
 		think: true,
-		stream: true
+		stream: true,
+		options: {
+			num_ctx: g_currentModel.details?.context_length ?? 4096
+		}
 	};
 	const response = await apiSend('POST', 'api/chat', payload, false);
 	
@@ -517,5 +569,15 @@ document.addEventListener('DOMContentLoaded', onDomContentLoaded);
 		<textarea id="chat-input" onkeydown="onChatInputKeyDown(event)"></textarea>
 	</div>
 </div>
+<div id="context-window-view">
+	<span>Context window: </span>
+	<span id="context-window-amount-tokens">0</span>
+	<span> / </span>
+	<span id="context-window-max-tokens">?</span>
+	<span> tokens</span>
+</div>
+<br>
+<br>
+<br>
 <body>
 </html>
