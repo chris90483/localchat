@@ -7,12 +7,19 @@ html {
 	color: lightgrey;
 }
 
-input, select, textarea {
+input, select, textarea, button {
 	background: black;
 	border: 1px solid black;
 	border-radius: 10px;
 	color: lightgray;
 	padding: 0.5rem;
+}
+
+button:hover {
+	cursor: pointer;
+}
+
+input, select, textarea {
 	min-width: 20rem;
 }
 
@@ -110,6 +117,19 @@ function setCookie(cname, cvalue, exdays) {
 function addToContextWindow(message) {
 	g_contextWindow.amountTokens += message.content.length;
 	g_contextWindow.messages.push(message);
+}
+
+function clearContextWindow() {
+	g_contextWindow.amountTokens = 0;
+	g_contextWindow.messages = [];
+	
+	const chat = document.querySelector('#chat-output');
+	const children = [...chat.children];
+	for (const child of children) {
+		chat.removeChild(child);
+	}
+
+	document.querySelector('#context-window-amount-tokens').innerText = 0;
 }
 
 function onSettingChanged(settingsPropName, newValue) {
@@ -575,6 +595,7 @@ document.addEventListener('DOMContentLoaded', onDomContentLoaded);
 	<span> / </span>
 	<span id="context-window-max-tokens">?</span>
 	<span> tokens</span>
+	<button onclick="clearContextWindow()">Clear!</button>
 </div>
 <br>
 <br>
